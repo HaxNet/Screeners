@@ -76,7 +76,7 @@ Customize shortcuts at `chrome://extensions/shortcuts`.
 ## Known limitations
 
 - Chrome-internal pages (`chrome://…`, the Web Store) can't be captured — Chrome blocks this for all extensions.
-- Full-page capture takes ~0.6s per screen height (Chrome rate-limits captures); pages with sticky headers may repeat the header in the stitch.
+- Full-page capture takes ~0.6s per screen height (Chrome rate-limits captures). Sticky/fixed headers are captured once at the top, then hidden for the rest of the stitch so they don't repeat.
 - Recordings are WebM (VP9/VP8). Convert externally if you need MP4.
 
 ---
@@ -115,6 +115,22 @@ lib/store.js           IndexedDB handoff for large captures
 lib/drive.js           OAuth (account chooser) + Drive multipart upload
 icons/                 Extension icons (512px source included for store listing)
 ```
+
+## Changelog
+
+### 1.0.1 — 2026-08-28
+
+- **Full-page capture rewritten** with pixel-matching stitching (panorama-style): sticky/fixed headers no longer repeat in the output, seams align even when sites adjust scroll position, and the bottom is trimmed when pages over-report their height.
+- **Stable-frame capture**: each frame is captured twice and compared, so lazily rendered pages (dashboards, virtualized lists) no longer produce garbled rows mid-repaint. Full-page captures are a bit slower in exchange for accuracy.
+- **Privacy tools in the editor**: blur, pixelate, and solid redact — drag an area or single-click to scramble a text-sized block.
+- **Adjustable crop**: move the selection, resize from 8 handles, or type exact pixel width/height; Enter applies.
+- **Region screen recording**: after picking what to share, drag on the live preview to record only that area.
+- **Area selector** rendered in the browser top layer so page CSS can't misplace it; scroll position no longer affects where the selection starts.
+- New icon set (16/48/128/512) generated from the refined logo.
+
+### 1.0.0 — 2026-08-28
+
+- Initial release: visible/area/full-page screenshots, editor with crop and annotations (pen, rectangle, ellipse, arrow, text), screen recording with mic/system audio, local save, clipboard copy, and Google Drive upload with per-user OAuth (account chooser, `drive.file` scope only).
 
 ## License
 

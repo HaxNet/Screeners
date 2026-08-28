@@ -51,6 +51,12 @@ async function captureVisible() {
 }
 
 // ---------------------------------------------------------------- full page
+//
+// Scroll-and-stitch with PIXEL MATCHING. Scroll position is only a hint:
+// every frame is aligned by finding where its pixels overlap the already-
+// stitched canvas (like panorama stitching). This survives sticky headers
+// of any construction (shadow DOM, rebuilt-on-scroll), scroll-position
+// corrections, and fractional devicePixelRatio.
 
 async function captureFullPage() {
   const tab = await activeTab();
@@ -58,7 +64,6 @@ async function captureFullPage() {
     return notifyError("This page can't be captured (browser-internal page).");
   }
 
-  // 1. Read page metrics + prepare page (hide scrollbar, remember scroll pos)
   const [{ result: metrics }] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: () => {
@@ -73,45 +78,184 @@ async function captureFullPage() {
       return {
         totalHeight: Math.max(doc.scrollHeight, document.body?.scrollHeight || 0),
         viewportHeight: window.innerHeight,
-        viewportWidth: window.innerWidth,
-        dpr: window.devicePixelRatio,
         originalScrollY: window.scrollY,
       };
     },
   });
 
-  const { totalHeight, viewportHeight, viewportWidth, dpr, originalScrollY } = metrics;
-  const MAX_HEIGHT_PX = 40000; // canvas safety cap
-  const cappedHeight = Math.min(totalHeight, MAX_HEIGHT_PX / dpr);
-  const steps = [];
-  for (let y = 0; y < cappedHeight; y += viewportHeight) {
-    steps.push(Math.min(y, cappedHeight - viewportHeight));
-  }
-  const uniqueSteps = [...new Set(steps.map((y) => Math.max(0, Math.round(y))))];
+  const { totalHeight, viewportHeight, originalScrollY } = metrics;
 
-  const canvas = new OffscreenCanvas(
-    Math.round(viewportWidth * dpr),
-    Math.round(cappedHeight * dpr)
-  );
-  const ctx = canvas.getContext("2d");
+  const scrollTo = (y) => chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (scrollY) => window.scrollTo(0, scrollY),
+    args: [y],
+  });
+  const getScrollY = async () => {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => window.scrollY,
+    });
+    return result;
+  };
+  const grabFrame = async () => {
+    const dataUrl = await captureVisibleDataUrl(tab.windowId);
+    return dataUrlToBitmap(dataUrl);
+  };
+
+  // Lazy-rendering pages (bank dashboards, virtualized lists) repaint rows
+  // shortly after each scroll. A single capture can photograph the page
+  // mid-repaint — garbling rows inside the frame itself. So: capture twice
+  // and only accept the frame once two consecutive captures look identical.
+  const cmpCanvas = new OffscreenCanvas(120, 200);
+  const cmpCtx = cmpCanvas.getContext("2d", { willReadFrequently: true });
+  const thumb = (bmp) => {
+    cmpCtx.clearRect(0, 0, 120, 200);
+    cmpCtx.drawImage(bmp, 0, 0, 120, 200);
+    return cmpCtx.getImageData(0, 0, 120, 200).data;
+  };
+  const framesEqual = (a, b) => {
+    let diff = 0, n = 0;
+    for (let i = 0; i < a.length; i += 16) { diff += Math.abs(a[i] - b[i]); n++; }
+    return diff / n < 2;
+  };
+  const grabStableFrame = async () => {
+    let prev = await grabFrame();
+    let prevT = thumb(prev);
+    for (let i = 0; i < 3; i++) {
+      await sleep(500); // respect capture rate limit + let repaints finish
+      const next = await grabFrame();
+      const nextT = thumb(next);
+      if (framesEqual(prevT, nextT)) { next.close(); return prev; }
+      prev.close();
+      prev = next;
+      prevT = nextT;
+    }
+    return prev; // still changing (e.g. animation) — use the latest
+  };
+
+  let canvas = null, ctx = null, W = 0, canvasH = 0;
+  let B = 0;           // canvas rows painted so far (device px)
+  let frameCanvas = null, fctx = null;
+
+  const frameImageData = (bmp) => {
+    if (!frameCanvas || frameCanvas.width !== bmp.width || frameCanvas.height !== bmp.height) {
+      frameCanvas = new OffscreenCanvas(bmp.width, bmp.height);
+      fctx = frameCanvas.getContext("2d", { willReadFrequently: true });
+    }
+    fctx.drawImage(bmp, 0, 0);
+    return fctx.getImageData(0, 0, bmp.width, bmp.height).data;
+  };
+
+  // Pick a reference strip (N rows) from the stitched canvas, close to the
+  // bottom, with enough pixel variance to be unambiguous (blank white rows
+  // on e.g. banking pages would match everywhere).
+  const STRIP = 24;
+  function pickStrip() {
+    const minS = Math.max(0, B - Math.round(canvasH * 0.4));
+    for (let S = B - STRIP; S >= minS; S -= 8) {
+      const d = ctx.getImageData(0, S, W, STRIP).data;
+      let sum = 0, sumSq = 0, n = 0;
+      for (let i = 1; i < d.length; i += 64) { // sample green channel
+        sum += d[i]; sumSq += d[i] * d[i]; n++;
+      }
+      const mean = sum / n;
+      const variance = sumSq / n - mean * mean;
+      if (variance > 40) return { S, data: d };
+    }
+    return null;
+  }
+
+  // Find the frame row where the strip matches best (sum of abs differences).
+  function matchStrip(frame, H, strip, expected) {
+    const xStep = 4 * 4, rowStep = 4;
+    const evaluate = (r) => {
+      let cost = 0, n = 0;
+      for (let dy = 0; dy < STRIP; dy += rowStep) {
+        const f = (r + dy) * W * 4, s = dy * W * 4;
+        for (let x = 0; x < W * 4 - 4; x += xStep) {
+          cost += Math.abs(frame[f + x] - strip[s + x])
+                + Math.abs(frame[f + x + 1] - strip[s + x + 1])
+                + Math.abs(frame[f + x + 2] - strip[s + x + 2]);
+          n += 3;
+        }
+      }
+      return cost / n;
+    };
+    const search = (lo, hi) => {
+      let best = -1, bestCost = Infinity;
+      for (let r = Math.max(0, lo); r <= Math.min(H - STRIP, hi); r++) {
+        const c = evaluate(r);
+        if (c < bestCost) { bestCost = c; best = r; }
+      }
+      return { best, bestCost };
+    };
+    // Search near the expected offset first; widen if the match is poor.
+    let { best, bestCost } = search(expected - 250, expected + 250);
+    if (bestCost > 6) {
+      const full = search(0, H - STRIP);
+      if (full.bestCost < bestCost) ({ best, bestCost } = full);
+    }
+    return bestCost <= 12 ? best : -1;
+  }
 
   try {
-    for (const y of uniqueSteps) {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: (scrollY) => window.scrollTo(0, scrollY),
-        args: [y],
-      });
-      await sleep(CAPTURE_DELAY_MS); // let layout settle + respect rate limit
-      const dataUrl = await captureVisibleDataUrl(tab.windowId);
-      const bmp = await dataUrlToBitmap(dataUrl);
-      // The last step may overlap the previous one; drawing at y*dpr is
-      // correct because we scrolled to exactly y.
-      ctx.drawImage(bmp, 0, Math.round(y * dpr));
+    // ---- Frame 1
+    await scrollTo(0);
+    await sleep(CAPTURE_DELAY_MS);
+    let bmp = await grabStableFrame();
+    W = bmp.width;
+    const effDpr0 = bmp.height / viewportHeight;
+    canvasH = Math.min(Math.round(totalHeight * effDpr0), 40000);
+    canvas = new OffscreenCanvas(W, canvasH);
+    ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0);
+    B = bmp.height;
+    bmp.close();
+
+    // ---- Remaining frames
+    let prevScroll = 0;
+    let guard = 0;
+    while (B < canvasH && guard++ < 200) {
+      const effDpr = B > 0 ? (canvasH / totalHeight) : effDpr0;
+      // Ask for ~35% overlap with what we've already stitched
+      const target = Math.max(0, B / effDpr - viewportHeight * 0.35);
+      await scrollTo(target);
+      await sleep(CAPTURE_DELAY_MS);
+      const actualY = await getScrollY();
+      const atBottom = !(actualY > prevScroll);
+      prevScroll = actualY;
+
+      bmp = await grabStableFrame();
+      const H = bmp.height;
+      const frame = frameImageData(bmp);
+
+      const strip = pickStrip();
+      let fB; // frame row corresponding to canvas row B
+      if (strip) {
+        const expected = Math.round(strip.S - actualY * (H / viewportHeight));
+        const r = matchStrip(frame, H, strip.data, expected);
+        fB = r >= 0 ? r + (B - strip.S) : -1;
+      } else {
+        fB = -1;
+      }
+      if (fB < 0) {
+        // No reliable pixel match (blank region / animation) — fall back to
+        // scroll arithmetic for this frame.
+        fB = Math.round(B - actualY * (H / viewportHeight));
+      }
+      fB = Math.max(0, Math.min(H, fB));
+
+      const fresh = H - fB;
+      if (fresh > 0) {
+        const dh = Math.min(fresh, canvasH - B);
+        ctx.drawImage(bmp, 0, fB, W, dh, 0, B, W, dh);
+        B += dh;
+      }
       bmp.close();
+
+      if (atBottom || fresh <= 0) break; // can't scroll further / nothing new
     }
   } finally {
-    // Restore the page regardless of errors
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: (scrollY) => {
@@ -122,7 +266,14 @@ async function captureFullPage() {
     }).catch(() => {});
   }
 
-  const blob = await canvas.convertToBlob({ type: "image/png" });
+  // Trim any unpainted rows at the bottom (page shorter than reported)
+  let out = canvas;
+  if (B < canvasH) {
+    out = new OffscreenCanvas(W, B);
+    out.getContext("2d").drawImage(canvas, 0, 0);
+  }
+
+  const blob = await out.convertToBlob({ type: "image/png" });
   await openEditor(blob, { source: "fullpage", pageUrl: tab.url, title: tab.title });
 }
 
@@ -179,7 +330,6 @@ async function openRecorder() {
 // ---------------------------------------------------------------- misc
 
 function notifyError(message) {
-  // Popup may already be closed; badge is a lightweight fallback signal.
   chrome.action.setBadgeText({ text: "!" });
   chrome.action.setBadgeBackgroundColor({ color: "#d93025" });
   setTimeout(() => chrome.action.setBadgeText({ text: "" }), 4000);
@@ -194,8 +344,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       switch (msg?.type) {
         case "CAPTURE_VISIBLE": await captureVisible(); break;
         case "CAPTURE_FULLPAGE":
-          // Ack immediately so the popup can close without killing the message;
-          // the capture then runs to completion in the worker.
+          // Ack immediately so the popup can close without killing the message
           sendResponse({ ok: true });
           chrome.action.setBadgeText({ text: "…" });
           try {
