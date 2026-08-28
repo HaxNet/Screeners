@@ -15,6 +15,7 @@ Capture, crop, annotate, record — save locally or to your own Google Drive.</p
 - ✂️ **Select area** — drag a rectangle over any part of the page (`Alt+Shift+A`)
 - 📜 **Full page** — auto-scrolls and stitches the entire page into one image
 - 🎨 **Editor** — crop (drag, resize with 8 handles, or type exact pixel dimensions), annotate with pen, rectangle, circle, arrow, and text, pick colors and stroke width, undo with `Ctrl/Cmd+Z`
+- 🔒 **Privacy tools** — hide confidential info with 🌫️ blur, ▦ pixelate, or ⬛ solid redact: drag over an area, or just single-click on the sensitive spot for a quick block. *Tip: for text you truly need hidden, use pixelate or redact — heavy research shows light blur on text can sometimes be reversed.*
 - 🎥 **Screen recording** (`Alt+Shift+R`) — record a tab, window, or your whole screen, **or drag a region on the live preview to record just that area**; optional microphone and system audio; saves as `.webm`
 - 💾 **Save anywhere** — download to your computer, copy to clipboard, or upload to a `Screeners` folder in **your own** Google Drive
 

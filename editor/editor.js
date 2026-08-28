@@ -72,8 +72,9 @@ async function init() {
 
 // ------------------------------------------------------------------ annotation tools
 
-let tool = null;                 // 'pen' | 'rect' | 'ellipse' | 'arrow' | 'text'
+let tool = null;                 // 'pen' | 'rect' | 'ellipse' | 'arrow' | 'text' | 'blur' | 'pixelate' | 'redact'
 let drag = null;                 // { x, y } drag origin in canvas coords
+const EFFECT_TOOLS = ["blur", "pixelate", "redact"];
 
 function setTool(next) {
   tool = tool === next ? null : next;
@@ -102,7 +103,15 @@ function drawShapePreview(a, b) {
   actx.lineCap = "round";
   actx.lineJoin = "round";
 
-  if (tool === "rect") {
+  if (EFFECT_TOOLS.includes(tool)) {
+    // dashed preview rectangle for blur/pixelate/redact
+    actx.setLineDash([8, 6]);
+    actx.lineWidth = 2;
+    actx.strokeStyle = "#8ab4f8";
+    actx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y),
+      Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+    actx.setLineDash([]);
+  } else if (tool === "rect") {
     actx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y),
       Math.abs(b.x - a.x), Math.abs(b.y - a.y));
   } else if (tool === "ellipse") {
@@ -153,14 +162,82 @@ anno.addEventListener("mousemove", (e) => {
   }
 });
 
-window.addEventListener("mouseup", async () => {
+window.addEventListener("mouseup", async (e) => {
   if (!drag) return;
+  const origin = drag;
   drag = null;
-  // Commit the overlay onto the main canvas
+  actx.setLineDash([]);
+
+  if (EFFECT_TOOLS.includes(tool)) {
+    actx.clearRect(0, 0, anno.width, anno.height); // remove dashed preview
+    const p = toCanvasXY(e);
+    let r = {
+      x: Math.min(origin.x, p.x), y: Math.min(origin.y, p.y),
+      w: Math.abs(p.x - origin.x), h: Math.abs(p.y - origin.y),
+    };
+    // Single click (no real drag) → quick block centered on the click,
+    // sized for a typical line of text and scaled by the width slider.
+    if (r.w < 6 || r.h < 6) {
+      const s = Number($("width").value);
+      const bw = s * 36, bh = s * 9;
+      r = { x: p.x - bw / 2, y: p.y - bh / 2, w: bw, h: bh };
+    }
+    await pushHistory();
+    applyEffect(tool, r);
+    return;
+  }
+
+  // Pen/shape tools: commit the overlay onto the main canvas
   await pushHistory();
   ctx.drawImage(anno, 0, 0);
   actx.clearRect(0, 0, anno.width, anno.height);
 });
+
+// ------------------------------------------------------------------ privacy effects
+
+function applyEffect(kind, r) {
+  // clamp to canvas, integer pixels
+  const x = Math.max(0, Math.round(r.x));
+  const y = Math.max(0, Math.round(r.y));
+  const w = Math.min(canvas.width - x, Math.round(r.w));
+  const h = Math.min(canvas.height - y, Math.round(r.h));
+  if (w < 2 || h < 2) return;
+  const s = Number($("width").value); // strength from the width slider
+
+  if (kind === "redact") {
+    ctx.fillStyle = $("color").value;
+    ctx.fillRect(x, y, w, h);
+    return;
+  }
+
+  if (kind === "pixelate") {
+    const cell = Math.max(6, s * 3); // bigger slider → chunkier mosaic
+    const tw = Math.max(1, Math.ceil(w / cell));
+    const th = Math.max(1, Math.ceil(h / cell));
+    const tmp = document.createElement("canvas");
+    tmp.width = tw; tmp.height = th;
+    const t = tmp.getContext("2d");
+    t.imageSmoothingEnabled = true;
+    t.drawImage(canvas, x, y, w, h, 0, 0, tw, th);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(tmp, 0, 0, tw, th, x, y, w, h);
+    ctx.imageSmoothingEnabled = true;
+    return;
+  }
+
+  // blur — sample a padded region so edges don't bleed transparency
+  const radius = Math.max(4, s * 2);
+  const pad = radius * 2;
+  const tmp = document.createElement("canvas");
+  tmp.width = w; tmp.height = h;
+  const t = tmp.getContext("2d");
+  t.filter = `blur(${radius}px)`;
+  const sx = Math.max(0, x - pad), sy = Math.max(0, y - pad);
+  const sw = Math.min(canvas.width - sx, w + pad * 2);
+  const sh = Math.min(canvas.height - sy, h + pad * 2);
+  t.drawImage(canvas, sx, sy, sw, sh, sx - x, sy - y, sw, sh);
+  ctx.drawImage(tmp, x, y);
+}
 
 // ------------------------------------------------------------------ text tool
 
