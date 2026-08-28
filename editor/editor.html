@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Screeners — Editor</title>
+  <style>
+    :root { --bg: #202124; --bar: #2d2e31; --fg: #e8eaed; --accent: #8ab4f8; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
+    #toolbar {
+      position: sticky; top: 0; z-index: 10; display: flex; align-items: center;
+      gap: 6px; padding: 8px 12px; background: var(--bar); flex-wrap: wrap;
+    }
+    button {
+      padding: 7px 12px; border: 1px solid #5f6368; border-radius: 6px;
+      background: transparent; color: var(--fg); font: inherit; cursor: pointer;
+    }
+    button:hover { background: #3c4043; }
+    button.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; }
+    button.primary:hover { background: #1765cc; }
+    button:disabled { opacity: .5; cursor: default; }
+    button.tool.active { background: #1a73e8; border-color: #1a73e8; color: #fff; }
+    #filename {
+      padding: 7px 10px; border: 1px solid #5f6368; border-radius: 6px;
+      background: #202124; color: var(--fg); font: inherit; width: 230px;
+    }
+    .sep { width: 1px; align-self: stretch; background: #5f6368; margin: 0 3px; }
+    #color {
+      width: 34px; height: 34px; padding: 2px; border: 1px solid #5f6368;
+      border-radius: 6px; background: transparent; cursor: pointer;
+    }
+    #width { accent-color: var(--accent); width: 90px; }
+    #cropDims { display: inline-flex; align-items: center; gap: 4px; color: #9aa0a6; }
+    #cropDims input {
+      width: 64px; padding: 6px 8px; border: 1px solid #5f6368; border-radius: 6px;
+      background: #202124; color: var(--fg); font: inherit;
+    }
+    #stage { display: flex; justify-content: center; padding: 24px; }
+    #canvasWrap { position: relative; box-shadow: 0 4px 24px rgba(0,0,0,.5); font-size: 0; }
+    canvas { max-width: 100%; }
+    #anno {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      pointer-events: none;
+    }
+    #anno.on { pointer-events: auto; cursor: crosshair; }
+    #cropLayer { position: absolute; inset: 0; cursor: crosshair; display: none; }
+    #cropRect {
+      position: absolute; border: 2px dashed var(--accent);
+      background: rgba(138,180,248,.15); display: none; cursor: move;
+      box-sizing: border-box;
+    }
+    #cropRect .h {
+      position: absolute; width: 12px; height: 12px; background: var(--accent);
+      border: 2px solid #fff; border-radius: 3px; box-sizing: border-box;
+    }
+    .h[data-h="nw"] { left: -7px;  top: -7px;    cursor: nwse-resize; }
+    .h[data-h="n"]  { left: calc(50% - 6px); top: -7px;    cursor: ns-resize; }
+    .h[data-h="ne"] { right: -7px; top: -7px;    cursor: nesw-resize; }
+    .h[data-h="e"]  { right: -7px; top: calc(50% - 6px);   cursor: ew-resize; }
+    .h[data-h="se"] { right: -7px; bottom: -7px; cursor: nwse-resize; }
+    .h[data-h="s"]  { left: calc(50% - 6px); bottom: -7px; cursor: ns-resize; }
+    .h[data-h="sw"] { left: -7px;  bottom: -7px; cursor: nesw-resize; }
+    .h[data-h="w"]  { left: -7px;  top: calc(50% - 6px);   cursor: ew-resize; }
+    #cropSize {
+      position: absolute; top: -26px; left: 0; background: #202124; color: #fff;
+      font: 11px/1 system-ui, sans-serif; padding: 4px 6px; border-radius: 4px;
+      white-space: nowrap; pointer-events: none;
+    }
+    #textInput {
+      position: absolute; display: none; z-index: 5; min-width: 60px;
+      background: rgba(32,33,36,.85); color: #fff; border: 1px dashed var(--accent);
+      outline: none; padding: 2px 4px; font-weight: 700;
+    }
+    #msg { min-height: 18px; margin-left: auto; }
+    #msg.ok  { color: #81c995; }
+    #msg.err { color: #f28b82; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <input id="filename" type="text" spellcheck="false" />
+    <div class="sep"></div>
+    <button class="tool" data-tool="pen"     title="Pen">✏️</button>
+    <button class="tool" data-tool="rect"    title="Rectangle">▭</button>
+    <button class="tool" data-tool="ellipse" title="Circle / Ellipse">◯</button>
+    <button class="tool" data-tool="arrow"   title="Arrow">↗</button>
+    <button class="tool" data-tool="text"    title="Text">🅰</button>
+    <input type="color" id="color" value="#e8402a" title="Color" />
+    <input type="range" id="width" min="1" max="16" value="5" title="Stroke width" />
+    <div class="sep"></div>
+    <button id="cropBtn">✂️ Crop</button>
+    <span id="cropDims" hidden>
+      W <input type="number" id="cropW" min="1" /> H <input type="number" id="cropH" min="1" />
+    </span>
+    <button id="applyCrop" class="primary" hidden>Apply crop</button>
+    <button id="cancelCrop" hidden>Cancel</button>
+    <button id="undoBtn" disabled>↩︎ Undo</button>
+    <div class="sep"></div>
+    <button id="copyBtn">📋 Copy</button>
+    <button id="downloadBtn" class="primary">⬇️ Save locally</button>
+    <button id="driveBtn">☁️ Drive</button>
+    <span id="msg"></span>
+  </div>
+
+  <div id="stage">
+    <div id="canvasWrap">
+      <canvas id="canvas"></canvas>
+      <canvas id="anno"></canvas>
+      <div id="cropLayer"></div>
+      <div id="cropRect">
+        <span class="h" data-h="nw"></span><span class="h" data-h="n"></span>
+        <span class="h" data-h="ne"></span><span class="h" data-h="e"></span>
+        <span class="h" data-h="se"></span><span class="h" data-h="s"></span>
+        <span class="h" data-h="sw"></span><span class="h" data-h="w"></span>
+        <span id="cropSize"></span>
+      </div>
+      <span id="textInput" contenteditable="true"></span>
+    </div>
+  </div>
+
+  <script type="module" src="editor.js"></script>
+</body>
+</html>

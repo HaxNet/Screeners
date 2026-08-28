@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Screeners — Recorder</title>
+  <style>
+    body { margin: 0; background: #202124; color: #e8eaed; font: 13px/1.5 system-ui, sans-serif; }
+    .wrap { padding: 18px; }
+    h1 { font-size: 16px; margin: 0 0 12px; }
+    label { display: flex; align-items: center; gap: 8px; margin: 8px 0; cursor: pointer; }
+    button {
+      padding: 9px 16px; border: 0; border-radius: 6px; font: inherit;
+      cursor: pointer; margin: 10px 8px 0 0;
+    }
+    .primary { background: #1a73e8; color: #fff; }
+    .rec     { background: #d93025; color: #fff; }
+    .plain   { background: #3c4043; color: #e8eaed; }
+    button:disabled { opacity: .5; cursor: default; }
+    #timer { font: 700 28px/1 ui-monospace, monospace; margin: 12px 0; display: none; }
+    #timer.on { display: block; color: #f28b82; }
+    video { width: 100%; border-radius: 8px; background: #000; }
+    #preview { display: none; }
+    #liveWrap { position: relative; margin-top: 12px; font-size: 0; }
+    #regionRect {
+      position: absolute; border: 2px dashed #8ab4f8;
+      background: rgba(138,180,248,.15); display: none; pointer-events: none;
+    }
+    #liveWrap.selecting { cursor: crosshair; }
+    #regionInfo { color: #9aa0a6; font-size: 12px; margin-top: 6px; min-height: 16px; }
+    #playback { display: none; margin-top: 12px; }
+    #filename {
+      width: 100%; box-sizing: border-box; padding: 8px 10px; margin-top: 12px;
+      border: 1px solid #5f6368; border-radius: 6px; background: #202124;
+      color: #e8eaed; font: inherit; display: none;
+    }
+    #msg { min-height: 18px; margin-top: 10px; }
+    #msg.ok { color: #81c995; } #msg.err { color: #f28b82; }
+    .note { color: #9aa0a6; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🎥 Screen recorder</h1>
+
+    <div id="setup">
+      <label><input type="checkbox" id="mic" /> Include microphone</label>
+      <label><input type="checkbox" id="sysAudio" checked /> Include tab/system audio (when available)</label>
+      <p class="note">You'll pick what to share next: a tab, a window, or the whole screen.
+        After that you can record all of it, or drag a region on the preview to record just that area.</p>
+      <button id="share" class="primary">Choose what to share…</button>
+    </div>
+
+    <div id="preview">
+      <div id="liveWrap" class="selecting">
+        <video id="live" autoplay muted playsinline></video>
+        <div id="regionRect"></div>
+      </div>
+      <div id="regionInfo">Drag on the preview to select a region, or record everything.</div>
+      <button id="recFull" class="rec">⏺ Record full</button>
+      <button id="recRegion" class="rec" disabled>⏺ Record selected region</button>
+      <button id="clearRegion" class="plain" disabled>Clear region</button>
+      <button id="cancelShare" class="plain">Cancel</button>
+      <p class="note">Keep this window open (it can be behind other windows, just not minimized) while recording.</p>
+    </div>
+
+    <div id="timer">00:00</div>
+    <button id="stop" class="rec" hidden>■ Stop recording</button>
+
+    <div id="playback"><video id="played" controls></video></div>
+    <input type="text" id="filename" spellcheck="false" />
+    <div id="actions" hidden>
+      <button id="download" class="primary">⬇️ Save locally</button>
+      <button id="drive" class="plain">☁️ Save to Google Drive</button>
+      <button id="again" class="plain">↺ New recording</button>
+    </div>
+    <div id="msg"></div>
+  </div>
+  <script type="module" src="recorder.js"></script>
+</body>
+</html>
