@@ -21,7 +21,6 @@ Capture, crop, annotate, record — save locally or to your own Google Drive.</p
 
 ## Install
 
-Until it's on the Chrome Web Store, install it in developer mode (takes a minute):
 
 1. Download this repo: **Code → Download ZIP** and unzip it (or `git clone`).
 2. Open `chrome://extensions` in Chrome (also works in Brave/Edge).
