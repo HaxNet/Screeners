@@ -66,9 +66,12 @@ Don't want to use the built-in Google client? Paste your own OAuth Client ID und
 | Screenshot visible area | `Alt+Shift+V` |
 | Select area | `Alt+Shift+A` |
 | Open screen recorder | `Alt+Shift+R` |
+| Copy image to clipboard (in editor) | `Ctrl/Cmd+C` |
 | Undo (in editor) | `Ctrl/Cmd+Z` |
 | Apply crop (in editor) | `Enter` |
 | Cancel area selection | `Esc` |
+
+> In the editor, `Ctrl/Cmd+C` copies the edited image (crop and annotations included). If you're typing in a field or have text selected, it copies the text as usual.
 
 Customize shortcuts at `chrome://extensions/shortcuts`.
 
@@ -116,6 +119,10 @@ icons/                 Extension icons (512px source included for store listing)
 ```
 
 ## Changelog
+
+### 1.0.2 — 2026-08-30
+
+- `Ctrl/Cmd+C` in the editor copies the image straight to the clipboard (skipped while typing in a field or when text is selected).
 
 ### 1.0.1 — 2026-08-28
 

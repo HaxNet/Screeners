@@ -480,6 +480,17 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     $("undoBtn").click();
   }
+  // Ctrl/Cmd+C copies the image — unless the user is copying text they
+  // selected or is typing in a field.
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
+    const el = document.activeElement;
+    const typing = el === textInput || el.tagName === "INPUT";
+    const hasTextSelection = !window.getSelection().isCollapsed;
+    if (!typing && !hasTextSelection) {
+      e.preventDefault();
+      $("copyBtn").click();
+    }
+  }
 });
 
 // ------------------------------------------------------------------ output
