@@ -64,36 +64,77 @@ async function captureFullPage() {
     return notifyError("This page can't be captured (browser-internal page).");
   }
 
+  // Find the element that actually scrolls. Many sites (and some layouts
+  // that only appear at certain window sizes / zoom levels) scroll an inner
+  // container rather than the document — in that case window.scrollY never
+  // changes and a naive capture yields only the visible area.
   const [{ result: metrics }] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: () => {
-      const doc = document.documentElement;
       const style = document.createElement("style");
       style.id = "__screeners_capture_style";
       style.textContent =
         "html::-webkit-scrollbar{display:none!important}" +
         "html{scrollbar-width:none!important;scroll-behavior:auto!important}" +
+        "*{scroll-behavior:auto!important}" +
         "*{animation-play-state:paused!important}";
       (document.head || document.documentElement).appendChild(style);
-      return {
-        totalHeight: Math.max(doc.scrollHeight, document.body?.scrollHeight || 0),
-        viewportHeight: window.innerHeight,
-        originalScrollY: window.scrollY,
-      };
+
+      const vh = window.innerHeight;
+      const doc = document.scrollingElement || document.documentElement;
+      const docHeight = Math.max(
+        doc.scrollHeight, document.documentElement.scrollHeight,
+        document.body?.scrollHeight || 0
+      );
+
+      // Does the document itself scroll?
+      if (docHeight > vh + 4) {
+        window.__screenersScroller = null; // means: use the window
+        return { totalHeight: docHeight, viewportHeight: vh,
+                 originalScrollY: window.scrollY, windowHeight: vh };
+      }
+
+      // Otherwise look for the tallest scrollable container filling the view
+      let best = null, bestScore = 0;
+      for (const el of document.querySelectorAll("body *")) {
+        const cs = getComputedStyle(el);
+        if (!/(auto|scroll|overlay)/.test(cs.overflowY)) continue;
+        if (el.scrollHeight <= el.clientHeight + 4) continue;
+        const r = el.getBoundingClientRect();
+        if (r.height < vh * 0.5 || r.width < window.innerWidth * 0.5) continue;
+        const score = el.scrollHeight;
+        if (score > bestScore) { bestScore = score; best = el; }
+      }
+      if (best) {
+        window.__screenersScroller = best;
+        return { totalHeight: best.scrollHeight, viewportHeight: best.clientHeight,
+                 originalScrollY: best.scrollTop, windowHeight: vh };
+      }
+
+      window.__screenersScroller = null;
+      return { totalHeight: docHeight, viewportHeight: vh,
+               originalScrollY: window.scrollY, usesContainer: false };
     },
   });
 
-  const { totalHeight, viewportHeight, originalScrollY } = metrics;
+  const { totalHeight, viewportHeight, originalScrollY, windowHeight } = metrics;
 
   const scrollTo = (y) => chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    func: (scrollY) => window.scrollTo(0, scrollY),
+    func: (scrollY) => {
+      const el = window.__screenersScroller;
+      if (el) el.scrollTop = scrollY;
+      else window.scrollTo(0, scrollY);
+    },
     args: [y],
   });
   const getScrollY = async () => {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () => window.scrollY,
+      func: () => {
+        const el = window.__screenersScroller;
+        return el ? el.scrollTop : window.scrollY;
+      },
     });
     return result;
   };
@@ -204,7 +245,9 @@ async function captureFullPage() {
     await sleep(CAPTURE_DELAY_MS);
     let bmp = await grabStableFrame();
     W = bmp.width;
-    const effDpr0 = bmp.height / viewportHeight;
+    // Pixel scale comes from the WINDOW height (the capture is always the
+    // full window), while scroll math uses the scroller's viewport height.
+    const effDpr0 = bmp.height / (windowHeight || viewportHeight);
     canvasH = Math.min(Math.round(totalHeight * effDpr0), 40000);
     canvas = new OffscreenCanvas(W, canvasH);
     ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -232,7 +275,7 @@ async function captureFullPage() {
       const strip = pickStrip();
       let fB; // frame row corresponding to canvas row B
       if (strip) {
-        const expected = Math.round(strip.S - actualY * (H / viewportHeight));
+        const expected = Math.round(strip.S - actualY * (H / (windowHeight || viewportHeight)));
         const r = matchStrip(frame, H, strip.data, expected);
         fB = r >= 0 ? r + (B - strip.S) : -1;
       } else {
@@ -241,7 +284,7 @@ async function captureFullPage() {
       if (fB < 0) {
         // No reliable pixel match (blank region / animation) — fall back to
         // scroll arithmetic for this frame.
-        fB = Math.round(B - actualY * (H / viewportHeight));
+        fB = Math.round(B - actualY * (H / (windowHeight || viewportHeight)));
       }
       fB = Math.max(0, Math.min(H, fB));
 
@@ -260,7 +303,10 @@ async function captureFullPage() {
       target: { tabId: tab.id },
       func: (scrollY) => {
         document.getElementById("__screeners_capture_style")?.remove();
-        window.scrollTo(0, scrollY);
+        const el = window.__screenersScroller;
+        if (el) el.scrollTop = scrollY;
+        else window.scrollTo(0, scrollY);
+        delete window.__screenersScroller;
       },
       args: [originalScrollY],
     }).catch(() => {});

@@ -120,6 +120,11 @@ icons/                 Extension icons (512px source included for store listing)
 
 ## Changelog
 
+### 1.0.3 — 2026-08-31
+
+- **Full-page capture now works on sites that scroll an inner container** instead of the document (previously it returned only the visible area on those layouts). The capture detects the real scrolling element, drives it directly, and restores its position afterward.
+- Pixel scale is derived from the window height independently of the scroller, fixing alignment when a scrolling container is shorter than the window.
+
 ### 1.0.2 — 2026-08-30
 
 - `Ctrl/Cmd+C` in the editor copies the image straight to the clipboard (skipped while typing in a field or when text is selected).
