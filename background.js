@@ -52,11 +52,19 @@ async function captureVisible() {
 
 // ---------------------------------------------------------------- full page
 //
-// Scroll-and-stitch with PIXEL MATCHING. Scroll position is only a hint:
-// every frame is aligned by finding where its pixels overlap the already-
-// stitched canvas (like panorama stitching). This survives sticky headers
-// of any construction (shadow DOM, rebuilt-on-scroll), scroll-position
-// corrections, and fractional devicePixelRatio.
+// Generic full-page capture that works across very different sites:
+//
+//  1. SCROLLER DETECTION — some pages scroll the document, others scroll an
+//     inner container. We drive whichever one actually moves.
+//  2. LAZY-LOAD PRE-PASS — infinite/lazy pages (LinkedIn, feeds, dashboards)
+//     only render content as you approach it. We scroll through the page once
+//     to force rendering, then return to the top before capturing.
+//  3. DYNAMIC HEIGHT — page height is re-measured during capture (it grows on
+//     lazy pages), and the canvas grows with it.
+//  4. PIXEL-MATCH STITCHING — each frame is aligned by matching its pixels to
+//     the stitched image, so sticky headers never repeat and seams stay tight.
+//  5. STABLE FRAMES — each frame is captured twice and compared so we never
+//     photograph a page mid-repaint.
 
 async function captureFullPage() {
   const tab = await activeTab();
@@ -64,121 +72,94 @@ async function captureFullPage() {
     return notifyError("This page can't be captured (browser-internal page).");
   }
 
-  // Find the element that actually scrolls. Many sites (and some layouts
-  // that only appear at certain window sizes / zoom levels) scroll an inner
-  // container rather than the document — in that case window.scrollY never
-  // changes and a naive capture yields only the visible area.
-  const [{ result: metrics }] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: () => {
-      const style = document.createElement("style");
-      style.id = "__screeners_capture_style";
-      style.textContent =
-        "html::-webkit-scrollbar{display:none!important}" +
-        "html{scrollbar-width:none!important;scroll-behavior:auto!important}" +
-        "*{scroll-behavior:auto!important}" +
-        "*{animation-play-state:paused!important}";
-      (document.head || document.documentElement).appendChild(style);
+  const run = (func, args = []) =>
+    chrome.scripting.executeScript({ target: { tabId: tab.id }, func, args })
+      .then(([r]) => r?.result);
 
-      const vh = window.innerHeight;
-      const doc = document.scrollingElement || document.documentElement;
-      const docHeight = Math.max(
-        doc.scrollHeight, document.documentElement.scrollHeight,
-        document.body?.scrollHeight || 0
-      );
+  // ---- 1. Prepare page + find the real scrolling element
+  const init = await run(() => {
+    const style = document.createElement("style");
+    style.id = "__screeners_capture_style";
+    style.textContent =
+      "html::-webkit-scrollbar{display:none!important}" +
+      "html{scrollbar-width:none!important}" +
+      "*{scroll-behavior:auto!important;animation-play-state:paused!important}";
+    (document.head || document.documentElement).appendChild(style);
 
-      // Does the document itself scroll?
-      if (docHeight > vh + 4) {
-        window.__screenersScroller = null; // means: use the window
-        return { totalHeight: docHeight, viewportHeight: vh,
-                 originalScrollY: window.scrollY, windowHeight: vh };
-      }
+    const vh = window.innerHeight;
+    const doc = document.scrollingElement || document.documentElement;
+    const docH = Math.max(doc.scrollHeight,
+      document.documentElement.scrollHeight, document.body?.scrollHeight || 0);
 
-      // Otherwise look for the tallest scrollable container filling the view
-      let best = null, bestScore = 0;
-      for (const el of document.querySelectorAll("body *")) {
-        const cs = getComputedStyle(el);
-        if (!/(auto|scroll|overlay)/.test(cs.overflowY)) continue;
-        if (el.scrollHeight <= el.clientHeight + 4) continue;
-        const r = el.getBoundingClientRect();
-        if (r.height < vh * 0.5 || r.width < window.innerWidth * 0.5) continue;
-        const score = el.scrollHeight;
-        if (score > bestScore) { bestScore = score; best = el; }
-      }
-      if (best) {
-        window.__screenersScroller = best;
-        return { totalHeight: best.scrollHeight, viewportHeight: best.clientHeight,
-                 originalScrollY: best.scrollTop, windowHeight: vh };
-      }
-
+    if (docH > vh + 4) {
       window.__screenersScroller = null;
-      return { totalHeight: docHeight, viewportHeight: vh,
-               originalScrollY: window.scrollY, usesContainer: false };
-    },
+      return { viewportHeight: vh, windowHeight: vh, originalScrollY: window.scrollY };
+    }
+    let best = null, bestH = 0;
+    for (const el of document.querySelectorAll("body *")) {
+      const cs = getComputedStyle(el);
+      if (!/(auto|scroll|overlay)/.test(cs.overflowY)) continue;
+      if (el.scrollHeight <= el.clientHeight + 4) continue;
+      const r = el.getBoundingClientRect();
+      if (r.height < vh * 0.5 || r.width < window.innerWidth * 0.5) continue;
+      if (el.scrollHeight > bestH) { bestH = el.scrollHeight; best = el; }
+    }
+    window.__screenersScroller = best;
+    return {
+      viewportHeight: best ? best.clientHeight : vh,
+      windowHeight: vh,
+      originalScrollY: best ? best.scrollTop : window.scrollY,
+    };
   });
 
-  const { totalHeight, viewportHeight, originalScrollY, windowHeight } = metrics;
+  const { viewportHeight, windowHeight, originalScrollY } = init;
 
-  const scrollTo = (y) => chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: (scrollY) => {
-      const el = window.__screenersScroller;
-      if (el) el.scrollTop = scrollY;
-      else window.scrollTo(0, scrollY);
-    },
-    args: [y],
+  const scrollTo = (y) => run((v) => {
+    const el = window.__screenersScroller;
+    if (el) el.scrollTop = v; else window.scrollTo(0, v);
+  }, [y]);
+
+  const readState = () => run(() => {
+    const el = window.__screenersScroller;
+    const doc = document.scrollingElement || document.documentElement;
+    return {
+      y: el ? el.scrollTop : window.scrollY,
+      height: el ? el.scrollHeight
+        : Math.max(doc.scrollHeight, document.documentElement.scrollHeight,
+                   document.body?.scrollHeight || 0),
+    };
   });
-  const getScrollY = async () => {
-    const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => {
-        const el = window.__screenersScroller;
-        return el ? el.scrollTop : window.scrollY;
-      },
-    });
-    return result;
-  };
-  const grabFrame = async () => {
-    const dataUrl = await captureVisibleDataUrl(tab.windowId);
-    return dataUrlToBitmap(dataUrl);
-  };
 
-  // Lazy-rendering pages (bank dashboards, virtualized lists) repaint rows
-  // shortly after each scroll. A single capture can photograph the page
-  // mid-repaint — garbling rows inside the frame itself. So: capture twice
-  // and only accept the frame once two consecutive captures look identical.
-  const cmpCanvas = new OffscreenCanvas(120, 200);
-  const cmpCtx = cmpCanvas.getContext("2d", { willReadFrequently: true });
+  const grabFrame = async () =>
+    dataUrlToBitmap(await captureVisibleDataUrl(tab.windowId));
+
+  // Compare downscaled thumbnails so we only accept settled frames
+  const cmp = new OffscreenCanvas(120, 200);
+  const cmpCtx = cmp.getContext("2d", { willReadFrequently: true });
   const thumb = (bmp) => {
     cmpCtx.clearRect(0, 0, 120, 200);
     cmpCtx.drawImage(bmp, 0, 0, 120, 200);
     return cmpCtx.getImageData(0, 0, 120, 200).data;
   };
-  const framesEqual = (a, b) => {
+  const same = (a, b) => {
     let diff = 0, n = 0;
     for (let i = 0; i < a.length; i += 16) { diff += Math.abs(a[i] - b[i]); n++; }
     return diff / n < 2;
   };
   const grabStableFrame = async () => {
-    let prev = await grabFrame();
-    let prevT = thumb(prev);
-    for (let i = 0; i < 3; i++) {
-      await sleep(500); // respect capture rate limit + let repaints finish
-      const next = await grabFrame();
-      const nextT = thumb(next);
-      if (framesEqual(prevT, nextT)) { next.close(); return prev; }
-      prev.close();
-      prev = next;
-      prevT = nextT;
+    let prev = await grabFrame(), prevT = thumb(prev);
+    for (let i = 0; i < 2; i++) {
+      await sleep(450);
+      const next = await grabFrame(), nextT = thumb(next);
+      if (same(prevT, nextT)) { next.close(); return prev; }
+      prev.close(); prev = next; prevT = nextT;
     }
-    return prev; // still changing (e.g. animation) — use the latest
+    return prev; // never settles (constant animation) — take the latest
   };
 
-  let canvas = null, ctx = null, W = 0, canvasH = 0;
-  let B = 0;           // canvas rows painted so far (device px)
+  let canvas = null, ctx = null, W = 0, canvasH = 0, B = 0;
   let frameCanvas = null, fctx = null;
-
-  const frameImageData = (bmp) => {
+  const frameData = (bmp) => {
     if (!frameCanvas || frameCanvas.width !== bmp.width || frameCanvas.height !== bmp.height) {
       frameCanvas = new OffscreenCanvas(bmp.width, bmp.height);
       fctx = frameCanvas.getContext("2d", { willReadFrequently: true });
@@ -187,28 +168,30 @@ async function captureFullPage() {
     return fctx.getImageData(0, 0, bmp.width, bmp.height).data;
   };
 
-  // Pick a reference strip (N rows) from the stitched canvas, close to the
-  // bottom, with enough pixel variance to be unambiguous (blank white rows
-  // on e.g. banking pages would match everywhere).
+  const MAX_CANVAS_H = 60000;
+  function growCanvasTo(h) {
+    const target = Math.min(Math.round(h), MAX_CANVAS_H);
+    if (target <= canvasH) return;
+    const next = new OffscreenCanvas(W, target);
+    const nctx = next.getContext("2d", { willReadFrequently: true });
+    if (canvas) nctx.drawImage(canvas, 0, 0);
+    canvas = next; ctx = nctx; canvasH = target;
+  }
+
   const STRIP = 24;
   function pickStrip() {
-    const minS = Math.max(0, B - Math.round(canvasH * 0.4));
+    const minS = Math.max(0, B - Math.round((windowHeight || 800) * 2));
     for (let S = B - STRIP; S >= minS; S -= 8) {
       const d = ctx.getImageData(0, S, W, STRIP).data;
       let sum = 0, sumSq = 0, n = 0;
-      for (let i = 1; i < d.length; i += 64) { // sample green channel
-        sum += d[i]; sumSq += d[i] * d[i]; n++;
-      }
+      for (let i = 1; i < d.length; i += 64) { sum += d[i]; sumSq += d[i] * d[i]; n++; }
       const mean = sum / n;
-      const variance = sumSq / n - mean * mean;
-      if (variance > 40) return { S, data: d };
+      if (sumSq / n - mean * mean > 40) return { S, data: d };
     }
     return null;
   }
-
-  // Find the frame row where the strip matches best (sum of abs differences).
   function matchStrip(frame, H, strip, expected) {
-    const xStep = 4 * 4, rowStep = 4;
+    const xStep = 16, rowStep = 4;
     const evaluate = (r) => {
       let cost = 0, n = 0;
       for (let dy = 0; dy < STRIP; dy += rowStep) {
@@ -230,7 +213,6 @@ async function captureFullPage() {
       }
       return { best, bestCost };
     };
-    // Search near the expected offset first; widen if the match is poor.
     let { best, bestCost } = search(expected - 250, expected + 250);
     if (bestCost > 6) {
       const full = search(0, H - STRIP);
@@ -240,81 +222,86 @@ async function captureFullPage() {
   }
 
   try {
-    // ---- Frame 1
+    // ---- 2. Lazy-load pre-pass: walk the page so content renders, then
+    //         return to the top. Stops when scrolling no longer advances.
+    const step = Math.max(200, viewportHeight * 0.8);
+    let prevY = -1, prevH = 0, stagnant = 0;
+    for (let i = 0; i < 60; i++) {
+      const s = await readState();
+      if (s.y <= prevY + 2 && s.height <= prevH + 2) {
+        if (++stagnant >= 2) break;      // bottom reached and nothing new loaded
+      } else {
+        stagnant = 0;
+      }
+      prevY = s.y; prevH = s.height;
+      if (s.height > MAX_CANVAS_H) break; // endless feed — stop growing
+      await scrollTo(s.y + step);
+      await sleep(320);                   // let lazy content render
+    }
+    await scrollTo(0);
+    await sleep(700);                     // settle after returning to top
+
+    // ---- 3. Capture loop
     await scrollTo(0);
     await sleep(CAPTURE_DELAY_MS);
     let bmp = await grabStableFrame();
     W = bmp.width;
-    // Pixel scale comes from the WINDOW height (the capture is always the
-    // full window), while scroll math uses the scroller's viewport height.
-    const effDpr0 = bmp.height / (windowHeight || viewportHeight);
-    canvasH = Math.min(Math.round(totalHeight * effDpr0), 40000);
-    canvas = new OffscreenCanvas(W, canvasH);
-    ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const scale = bmp.height / (windowHeight || viewportHeight); // device px per CSS px
+    let state = await readState();
+    growCanvasTo(state.height * scale);
     ctx.drawImage(bmp, 0, 0);
     B = bmp.height;
     bmp.close();
 
-    // ---- Remaining frames
-    let prevScroll = 0;
-    let guard = 0;
-    while (B < canvasH && guard++ < 200) {
-      const effDpr = B > 0 ? (canvasH / totalHeight) : effDpr0;
-      // Ask for ~35% overlap with what we've already stitched
-      const target = Math.max(0, B / effDpr - viewportHeight * 0.35);
+    let lastY = 0, guard = 0;
+    while (guard++ < 300) {
+      state = await readState();
+      growCanvasTo(state.height * scale); // page may have grown (lazy load)
+      if (B >= canvasH) break;
+
+      const target = Math.max(0, B / scale - viewportHeight * 0.35);
       await scrollTo(target);
       await sleep(CAPTURE_DELAY_MS);
-      const actualY = await getScrollY();
-      const atBottom = !(actualY > prevScroll);
-      prevScroll = actualY;
+      const after = await readState();
+      const advanced = after.y > lastY + 1;
+      lastY = after.y;
 
       bmp = await grabStableFrame();
       const H = bmp.height;
-      const frame = frameImageData(bmp);
+      const frame = frameData(bmp);
 
+      let fB = -1;
       const strip = pickStrip();
-      let fB; // frame row corresponding to canvas row B
       if (strip) {
-        const expected = Math.round(strip.S - actualY * (H / (windowHeight || viewportHeight)));
+        const expected = Math.round(strip.S - after.y * scale);
         const r = matchStrip(frame, H, strip.data, expected);
-        fB = r >= 0 ? r + (B - strip.S) : -1;
-      } else {
-        fB = -1;
+        if (r >= 0) fB = r + (B - strip.S);
       }
-      if (fB < 0) {
-        // No reliable pixel match (blank region / animation) — fall back to
-        // scroll arithmetic for this frame.
-        fB = Math.round(B - actualY * (H / (windowHeight || viewportHeight)));
-      }
+      if (fB < 0) fB = Math.round(B - after.y * scale); // fallback: scroll math
       fB = Math.max(0, Math.min(H, fB));
 
-      const fresh = H - fB;
+      const fresh = Math.min(H - fB, canvasH - B);
       if (fresh > 0) {
-        const dh = Math.min(fresh, canvasH - B);
-        ctx.drawImage(bmp, 0, fB, W, dh, 0, B, W, dh);
-        B += dh;
+        ctx.drawImage(bmp, 0, fB, W, fresh, 0, B, W, fresh);
+        B += fresh;
       }
       bmp.close();
 
-      if (atBottom || fresh <= 0) break; // can't scroll further / nothing new
+      if (!advanced) break;        // can't scroll further — done
+      if (fresh <= 0) break;       // nothing new captured
     }
   } finally {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: (scrollY) => {
-        document.getElementById("__screeners_capture_style")?.remove();
-        const el = window.__screenersScroller;
-        if (el) el.scrollTop = scrollY;
-        else window.scrollTo(0, scrollY);
-        delete window.__screenersScroller;
-      },
-      args: [originalScrollY],
-    }).catch(() => {});
+    await run((y) => {
+      document.getElementById("__screeners_capture_style")?.remove();
+      const el = window.__screenersScroller;
+      if (el) el.scrollTop = y; else window.scrollTo(0, y);
+      delete window.__screenersScroller;
+    }, [originalScrollY]).catch(() => {});
   }
 
-  // Trim any unpainted rows at the bottom (page shorter than reported)
+  // Trim unpainted rows (page reported taller than it rendered)
   let out = canvas;
-  if (B < canvasH) {
+  if (B > 0 && B < canvasH) {
     out = new OffscreenCanvas(W, B);
     out.getContext("2d").drawImage(canvas, 0, 0);
   }
@@ -322,6 +309,7 @@ async function captureFullPage() {
   const blob = await out.convertToBlob({ type: "image/png" });
   await openEditor(blob, { source: "fullpage", pageUrl: tab.url, title: tab.title });
 }
+
 
 // ---------------------------------------------------------------- area select
 

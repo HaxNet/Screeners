@@ -78,7 +78,8 @@ Customize shortcuts at `chrome://extensions/shortcuts`.
 ## Known limitations
 
 - Chrome-internal pages (`chrome://…`, the Web Store) can't be captured — Chrome blocks this for all extensions.
-- Full-page capture takes ~0.6s per screen height (Chrome rate-limits captures). Sticky/fixed headers are captured once at the top, then hidden for the rest of the stitch so they don't repeat.
+- Full-page capture is deliberately unhurried: it pre-scrolls the page to trigger lazy-loaded content, then captures each frame twice to confirm the page has settled (Chrome also rate-limits captures). Expect several seconds on long pages — that's the cost of clean, correctly aligned output.
+- Endless feeds (an infinite-scroll timeline with no bottom) are capped rather than captured forever. Profile and article pages capture in full.
 - Recordings are WebM (VP9/VP8). Convert externally if you need MP4.
 
 ---
@@ -119,6 +120,12 @@ icons/                 Extension icons (512px source included for store listing)
 ```
 
 ## Changelog
+
+### 1.0.4 — 2026-09-06
+
+- **Full-page capture now handles lazy-loading and infinite-scroll pages** (LinkedIn profiles, feeds, dashboards). Before capturing, the extension scrolls through the page once to force content to render, then returns to the top — previously these pages captured only the first screen or two.
+- **Page height is re-measured during capture** and the canvas grows with it, so content that loads mid-capture is included.
+- Capture stops cleanly when scrolling stops advancing, and endless feeds are capped rather than running forever.
 
 ### 1.0.3 — 2026-08-31
 
