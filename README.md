@@ -121,6 +121,14 @@ icons/                 Extension icons (512px source included for store listing)
 
 ## Changelog
 
+### 1.0.5 — 2026-09-25
+
+- **Fixed full-page capture on updated Chromium browsers.** Recent Chrome/Brave/Vivaldi/Edge builds throttle `captureVisibleTab` more aggressively and return the *previous* frame instead of erroring when called too quickly. Those stale frames were being stitched as if they were new, causing repeated headers and duplicated content.
+  - Captures are retried with exponential backoff when the browser throttles.
+  - Each frame is verified to differ from the last accepted one; a stale capture is discarded and re-requested.
+  - Spacing between captures increased to stay inside the new throttle window.
+- **Sticky headers can no longer be stitched twice.** The pinned bar is measured at each scroll position and enforced as a hard floor on the crop, so even if pixel matching is thrown off, the header band is never pasted into the image again.
+
 ### 1.0.4 — 2026-09-06
 
 - **Full-page capture now handles lazy-loading and infinite-scroll pages** (LinkedIn profiles, feeds, dashboards). Before capturing, the extension scrolls through the page once to force content to render, then returns to the top — previously these pages captured only the first screen or two.

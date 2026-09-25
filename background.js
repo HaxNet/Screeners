@@ -4,7 +4,9 @@
 
 import { putCapture, newCaptureId } from "./lib/store.js";
 
-const CAPTURE_DELAY_MS = 600; // captureVisibleTab is rate-limited to ~2/sec
+// captureVisibleTab is rate-limited (~2/sec, tightened further in recent
+// Chrome builds). Going faster returns stale frames instead of fresh ones.
+const CAPTURE_DELAY_MS = 750;
 
 // ---------------------------------------------------------------- utilities
 
@@ -130,10 +132,25 @@ async function captureFullPage() {
     };
   });
 
-  const grabFrame = async () =>
-    dataUrlToBitmap(await captureVisibleDataUrl(tab.windowId));
+  // Recent Chrome builds throttle captureVisibleTab harder: calling it too
+  // soon either throws MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND or hands back
+  // the PREVIOUS frame. A stale frame silently corrupts the stitch (repeated
+  // headers, duplicated bands), so every capture is retried on error and
+  // verified to be genuinely new before it is used.
+  const grabFrame = async () => {
+    let wait = 350;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        return await dataUrlToBitmap(await captureVisibleDataUrl(tab.windowId));
+      } catch (e) {
+        if (attempt === 4) throw e;
+        await sleep(wait);
+        wait = Math.min(wait * 2, 2000); // back off through the throttle window
+      }
+    }
+  };
 
-  // Compare downscaled thumbnails so we only accept settled frames
+  // Compare downscaled thumbnails so we only accept settled, non-stale frames
   const cmp = new OffscreenCanvas(120, 200);
   const cmpCtx = cmp.getContext("2d", { willReadFrequently: true });
   const thumb = (bmp) => {
@@ -141,21 +158,58 @@ async function captureFullPage() {
     cmpCtx.drawImage(bmp, 0, 0, 120, 200);
     return cmpCtx.getImageData(0, 0, 120, 200).data;
   };
-  const same = (a, b) => {
+  const diffOf = (a, b) => {
     let diff = 0, n = 0;
     for (let i = 0; i < a.length; i += 16) { diff += Math.abs(a[i] - b[i]); n++; }
-    return diff / n < 2;
+    return diff / n;
   };
-  const grabStableFrame = async () => {
-    let prev = await grabFrame(), prevT = thumb(prev);
-    for (let i = 0; i < 2; i++) {
-      await sleep(450);
-      const next = await grabFrame(), nextT = thumb(next);
-      if (same(prevT, nextT)) { next.close(); return prev; }
-      prev.close(); prev = next; prevT = nextT;
+  const same = (a, b) => diffOf(a, b) < 2;
+
+  // `staleRef` is the thumbnail of the previously ACCEPTED frame. After a
+  // scroll the new frame must differ from it; if it doesn't, the browser
+  // returned a cached capture and we wait and ask again.
+  const grabStableFrame = async (staleRef = null) => {
+    for (let round = 0; round < 4; round++) {
+      let prev = await grabFrame(), prevT = thumb(prev);
+      let settled = false;
+      for (let i = 0; i < 2; i++) {
+        await sleep(450);
+        const next = await grabFrame(), nextT = thumb(next);
+        if (same(prevT, nextT)) { next.close(); settled = true; break; }
+        prev.close(); prev = next; prevT = nextT;
+      }
+      // Reject a capture identical to the last accepted one (stale/throttled)
+      if (staleRef && same(prevT, staleRef)) {
+        prev.close();
+        await sleep(700 + round * 400);
+        continue;
+      }
+      void settled;
+      return prev;
     }
-    return prev; // never settles (constant animation) — take the latest
+    return grabFrame(); // give up on freshness rather than hang
   };
+
+  // Height of any bar pinned to the top of the viewport, in CSS px. Used as a
+  // hard floor for the crop so a sticky header can never be stitched twice,
+  // even if pixel matching is thrown off. Pierces shadow DOM.
+  const measureStickyTop = () => run(() => {
+    const vh = window.innerHeight, vw = window.innerWidth;
+    let top = 0;
+    const visit = (root) => {
+      for (const el of root.querySelectorAll("*")) {
+        if (el.shadowRoot) visit(el.shadowRoot);
+        const cs = getComputedStyle(el);
+        if (cs.position !== "fixed" && cs.position !== "sticky") continue;
+        if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < vw * 0.5 || r.height <= 0 || r.height > vh * 0.5) continue;
+        if (r.top <= 2 && r.bottom > 0) top = Math.max(top, Math.min(r.bottom, vh));
+      }
+    };
+    visit(document);
+    return Math.ceil(top);
+  }).catch(() => 0);
 
   let canvas = null, ctx = null, W = 0, canvasH = 0, B = 0;
   let frameCanvas = null, fctx = null;
@@ -251,6 +305,7 @@ async function captureFullPage() {
     growCanvasTo(state.height * scale);
     ctx.drawImage(bmp, 0, 0);
     B = bmp.height;
+    let lastThumb = thumb(bmp); // guards against stale/throttled captures
     bmp.close();
 
     let lastY = 0, guard = 0;
@@ -266,7 +321,11 @@ async function captureFullPage() {
       const advanced = after.y > lastY + 1;
       lastY = after.y;
 
-      bmp = await grabStableFrame();
+      // Sticky bars are measured at THIS scroll position, while they're
+      // actually pinned, and converted to device pixels.
+      const stickyPx = advanced ? Math.round((await measureStickyTop()) * scale) : 0;
+
+      bmp = await grabStableFrame(advanced ? lastThumb : null);
       const H = bmp.height;
       const frame = frameData(bmp);
 
@@ -278,6 +337,9 @@ async function captureFullPage() {
         if (r >= 0) fB = r + (B - strip.S);
       }
       if (fB < 0) fB = Math.round(B - after.y * scale); // fallback: scroll math
+      // Hard floor: never stitch pixels from inside the pinned header band,
+      // no matter what the matcher concluded.
+      fB = Math.max(fB, Math.min(stickyPx, Math.round(H * 0.5)));
       fB = Math.max(0, Math.min(H, fB));
 
       const fresh = Math.min(H - fB, canvasH - B);
@@ -285,6 +347,7 @@ async function captureFullPage() {
         ctx.drawImage(bmp, 0, fB, W, fresh, 0, B, W, fresh);
         B += fresh;
       }
+      lastThumb = thumb(bmp);
       bmp.close();
 
       if (!advanced) break;        // can't scroll further — done
