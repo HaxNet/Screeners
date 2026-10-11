@@ -121,6 +121,10 @@ icons/                 Extension icons (512px source included for store listing)
 
 ## Changelog
 
+### 1.0.6 — 2026-10-11
+
+- **Fixed "exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota" errors on Chrome 155+.** Visible-tab and area captures called `captureVisibleTab` once with no retry, so capturing again shortly after a previous capture failed. All captures now go through one queue that spaces calls out and retries with backoff when the browser reports the quota.
+
 ### 1.0.5 — 2026-09-25
 
 - **Fixed full-page capture on updated Chromium browsers.** Recent Chrome/Brave/Vivaldi/Edge builds throttle `captureVisibleTab` more aggressively and return the *previous* frame instead of erroring when called too quickly. Those stale frames were being stitched as if they were new, causing repeated headers and duplicated content.

@@ -36,8 +36,35 @@ async function openEditor(blob, meta = {}) {
   });
 }
 
-async function captureVisibleDataUrl(windowId) {
-  return chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+// Every captureVisibleTab call goes through here: calls are serialized,
+// spaced out, and retried with backoff when Chrome reports the per-second
+// quota, so no capture path (visible, area, full page) can trip it.
+const MIN_CAPTURE_INTERVAL_MS = 600;
+let lastCaptureAt = 0;
+let captureQueue = Promise.resolve();
+
+function isQuotaError(e) {
+  return /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND/.test(e?.message || "");
+}
+
+function captureVisibleDataUrl(windowId) {
+  const job = captureQueue.then(async () => {
+    let wait = 400;
+    for (let attempt = 0; ; attempt++) {
+      const gap = lastCaptureAt + MIN_CAPTURE_INTERVAL_MS - Date.now();
+      if (gap > 0) await sleep(gap);
+      lastCaptureAt = Date.now();
+      try {
+        return await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+      } catch (e) {
+        if (!isQuotaError(e) || attempt >= 5) throw e;
+        await sleep(wait);
+        wait = Math.min(wait * 2, 2000); // back off through the throttle window
+      }
+    }
+  });
+  captureQueue = job.catch(() => {});
+  return job;
 }
 
 // ---------------------------------------------------------------- visible tab
@@ -133,22 +160,12 @@ async function captureFullPage() {
   });
 
   // Recent Chrome builds throttle captureVisibleTab harder: calling it too
-  // soon either throws MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND or hands back
-  // the PREVIOUS frame. A stale frame silently corrupts the stitch (repeated
-  // headers, duplicated bands), so every capture is retried on error and
-  // verified to be genuinely new before it is used.
-  const grabFrame = async () => {
-    let wait = 350;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        return await dataUrlToBitmap(await captureVisibleDataUrl(tab.windowId));
-      } catch (e) {
-        if (attempt === 4) throw e;
-        await sleep(wait);
-        wait = Math.min(wait * 2, 2000); // back off through the throttle window
-      }
-    }
-  };
+  // soon either throws MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND (handled in
+  // captureVisibleDataUrl) or hands back the PREVIOUS frame. A stale frame
+  // silently corrupts the stitch (repeated headers, duplicated bands), so
+  // every frame is verified to be genuinely new before it is used.
+  const grabFrame = async () =>
+    dataUrlToBitmap(await captureVisibleDataUrl(tab.windowId));
 
   // Compare downscaled thumbnails so we only accept settled, non-stale frames
   const cmp = new OffscreenCanvas(120, 200);

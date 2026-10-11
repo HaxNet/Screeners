@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAn++zS8HcSVewv9KTutJXEwjlVUoUeCSJyz5Bjk8SP4op537B/cTHGygMzyPhaWJSCPEeawlcEH8jAvlht6FN4O2r0APnWcRg6YKOn9DMkWBMCrt39zAj2s042KOV9h0t7vw1Tm0df77VUvys/HPMkSKSocuN8U31XaVTUX9Afv6oaOaYlHuGQlSeLbhqypVb5ZXcCw9U8Xt/vxcfEk2Fe8Qdgd004+h2+EegOsdeAATJawfgD1ER5L7xQZLFG2f9ogIktDxxH3Nb9CPfT9Rt3eQ1FwDmmO1vVNicrxK1Amzwuvjd7n+UzDWbvzhmxK+y5F4v63/Uff8m+8KOARGtdQIDAQAB",
   "name": "Screeners — Screenshot & Screen Recorder",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Capture awesome shots: visible tab, full page, or selected area screenshots with crop, plus screen recording. Save locally or to YOUR OWN Google Drive.",
   "minimum_chrome_version": "116",
   "permissions": [
